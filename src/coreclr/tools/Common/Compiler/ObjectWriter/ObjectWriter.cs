@@ -37,7 +37,7 @@ namespace ILCompiler.ObjectWriter
 
         private readonly Dictionary<ISymbolNode, Utf8String> _mangledNameMap = new();
 
-        private readonly byte _insPaddingByte;
+        private readonly byte[] _insPadding;
 
         // Standard sections
         private readonly Dictionary<string, int> _sectionNameToSectionIndex = new(StringComparer.Ordinal);
@@ -55,12 +55,21 @@ namespace ILCompiler.ObjectWriter
             _outputInfoBuilder = outputInfoBuilder;
             _isSingleFileCompilation = _nodeFactory.CompilationModuleGroup.IsSingleFileCompilation;
 
-            // Padding byte for code sections (NOP for x86/x64)
-            _insPaddingByte = factory.Target.Architecture switch
+            // Padding pattern for code sections: a NOP, so that whatever decodes the
+            // section linearly - a disassembler, a debugger, a loader that validates
+            // the code - reads instructions rather than a hole. A zero word decodes as a
+            // trap (udf #0) on ARM64 and as an illegal encoding on LoongArch64 and RISC-V.
+            _insPadding = factory.Target.Architecture switch
             {
-                TargetArchitecture.X86 => 0x90,
-                TargetArchitecture.X64 => 0x90,
-                _ => 0
+                TargetArchitecture.X86 => [0x90],                             // nop
+                TargetArchitecture.X64 => [0x90],                             // nop
+                TargetArchitecture.ARM64 => [0x1F, 0x20, 0x03, 0xD5],         // nop
+                TargetArchitecture.LoongArch64 => [0x00, 0x00, 0x40, 0x03],   // andi $r0, $r0, 0
+                // RISC-V gets the compressed NOP: the JIT emits RVC, so a method can
+                // end two bytes short of a four-byte boundary, and the tail of a
+                // four-byte pattern would leave 0x0000 there - the illegal encoding.
+                TargetArchitecture.RiscV64 => [0x01, 0x00],                   // c.nop
+                _ => [0]
             };
         }
         private protected virtual bool UsesSubsectionsViaSymbols => false;
@@ -107,7 +116,7 @@ namespace ILCompiler.ObjectWriter
 
             if (!comdatName.IsNull || !_sectionNameToSectionIndex.TryGetValue(section.Name, out sectionIndex))
             {
-                sectionData = new SectionData(section.Type == SectionType.Executable ? _insPaddingByte : (byte)0);
+                sectionData = new SectionData(section.Type == SectionType.Executable ? _insPadding : null);
                 sectionIndex = _sectionIndexToData.Count;
                 CreateSection(section, comdatName, symbolName, sectionIndex, sectionData.GetReadStream());
                 _sectionIndexToData.Add(sectionData);

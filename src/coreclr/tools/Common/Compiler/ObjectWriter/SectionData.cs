@@ -26,10 +26,25 @@ namespace ILCompiler.ObjectWriter
         private readonly List<ReadOnlyMemory<byte>> _buffers = new();
         private long _length;
         private readonly byte[] _padding = new byte[16];
+        private readonly int _paddingPatternLength = 1;
 
-        public SectionData(byte paddingByte = 0)
+        public SectionData(ReadOnlySpan<byte> paddingPattern = default)
         {
-            _padding.AsSpan().Fill(paddingByte);
+            if (paddingPattern.Length <= 1)
+            {
+                _padding.AsSpan().Fill(paddingPattern.Length == 0 ? (byte)0 : paddingPattern[0]);
+            }
+            else
+            {
+                // Repeat the pattern across the whole buffer, so that any padding up
+                // to _padding.Length can be served by a single copy.
+                Debug.Assert(_padding.Length % paddingPattern.Length == 0);
+                for (int i = 0; i < _padding.Length; i += paddingPattern.Length)
+                {
+                    paddingPattern.CopyTo(_padding.AsSpan(i));
+                }
+                _paddingPatternLength = paddingPattern.Length;
+            }
         }
 
         private void FlushAppendBuffer()
@@ -53,9 +68,24 @@ namespace ILCompiler.ObjectWriter
         {
             if (paddingLength > 0)
             {
-                if (_appendBuffer.WrittenCount > 0 || paddingLength > _padding.Length)
+                // A multi-byte pattern is an instruction, so it has to stay in phase
+                // with the section offset. Both paths below start the pattern at its
+                // first byte, so they only apply when the gap does too.
+                int phase = (int)(Length % _paddingPatternLength);
+                if (_appendBuffer.WrittenCount > 0 || paddingLength > _padding.Length || phase != 0)
                 {
-                    _appendBuffer.GetSpan(paddingLength).Slice(0, paddingLength).Fill(_padding[0]);
+                    Span<byte> span = _appendBuffer.GetSpan(paddingLength).Slice(0, paddingLength);
+                    if (_paddingPatternLength == 1)
+                    {
+                        span.Fill(_padding[0]);
+                    }
+                    else
+                    {
+                        for (int i = 0; i < span.Length; i++)
+                        {
+                            span[i] = _padding[(phase + i) % _paddingPatternLength];
+                        }
+                    }
                     _appendBuffer.Advance(paddingLength);
                 }
                 else
